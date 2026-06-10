@@ -23,6 +23,30 @@ st.markdown("""
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     h1 { font-size: 2.2rem !important; text-align: center; }
     p { text-align: center; }
+    
+    /* 1. สร้างกล่อง Placeholder สีดำล็อคขนาดไว้ (ป้องกันหน้าจอกระตุกตอนเปิดกล้อง) */
+    div[data-testid="stVideo"] {
+        width: 100% !important;
+        max-width: 640px !important;
+        aspect-ratio: 4 / 3 !important;
+        background-color: #111111 !important;
+        border-radius: 12px;
+        overflow: hidden;
+        margin: 0 auto;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+
+    /* 2. ซ่อนกล่อง Selectbox (เมนูเลือกอุปกรณ์/ไมค์) ที่ไม่ได้ใช้งาน */
+    div[data-testid="stSelectbox"] {
+        display: none !important;
+    }
+    
+    /* 3. จัดให้ปุ่ม START / STOP ของ WebRTC อยู่กึ่งกลางหน้าจออย่างสวยงาม */
+    div.element-container:has(button) {
+        display: flex;
+        justify-content: center;
+        margin-top: 10px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -43,7 +67,6 @@ def load_model():
 
 model = load_model()
 
-# --- [COMMENTED OUT] ปิดฟังก์ชันการส่งภาพเข้า Telegram ---
 # def send_telegram(message, image_bytes):
 #     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
 #     try:
@@ -54,7 +77,6 @@ model = load_model()
 #     except Exception as e:
 #         return False
 
-# สร้าง Session State สำหรับคุม Cooldown (คอมเม้นต์เก็บไว้เผื่อเปิดใช้งานระบบแจ้งเตือนในอนาคต)
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = 0
 alert_cooldown = 15
@@ -90,7 +112,6 @@ def video_frame_callback(frame):
                 cv2.putText(img, label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-    # --- [COMMENTED OUT] ปิดส่วนการแคปภาพและส่งแจ้งเตือนเพื่อความเป็นส่วนตัวของผู้ใช้บน Portfolio ---
     # current_time = time.time()
     # if object_detected and (current_time - st.session_state.last_alert_time > alert_cooldown):
     #     img_alert_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
