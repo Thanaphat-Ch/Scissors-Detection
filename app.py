@@ -1,4 +1,3 @@
-import os
 import cv2
 import time
 import requests
@@ -6,25 +5,18 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 from ultralytics import YOLO
-from dotenv import load_dotenv
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 
-# --- [COMMENTED OUT] ปิดการโหลดตัวแปรความลับ Telegram เพื่อความปลอดภัยของผู้ใช้งาน ---
-# load_dotenv()
-# TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# CHAT_ID = os.getenv("CHAT_ID")
+# --- 1. ตั้งค่าหน้าเว็บให้สวยงามและรองรับมือถือ (Responsive) ---
+st.set_page_config(page_title="AI Scissors Detection", page_icon="✂️", layout="centered")
 
-# 1. ตั้งค่าหน้าเว็บให้ Responsive และสวยงาม
-st.set_page_config(page_title="Scissors Detection App", page_icon="✂️", layout="centered")
-
-# ตกแต่ง UI เพิ่มเติมด้วย CSS เล็กน้อยเพื่อให้ปุ่มกดและวิดีโอดูดีในมือถือ
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     h1 { font-size: 2.2rem !important; text-align: center; }
     p { text-align: center; }
     
-    /* 1. สร้างกล่อง Placeholder สีดำล็อคขนาดไว้ (ป้องกันหน้าจอกระตุกตอนเปิดกล้อง) */
+    /* ล็อกขนาดกล่องวิดีโอ (ป้องกันหน้าจอกระตุกตอนเปิดกล้องบนมือถือ) */
     div[data-testid="stVideo"] {
         width: 100% !important;
         max-width: 640px !important;
@@ -35,13 +27,13 @@ st.markdown("""
         margin: 0 auto;
         box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     }
-
-    /* 2. ซ่อนกล่อง Selectbox (เมนูเลือกอุปกรณ์/ไมค์) ที่ไม่ได้ใช้งาน */
+    
+    /* ซ่อนเมนูเลือกอุปกรณ์ของ WebRTC ที่ไม่ได้ใช้งานเพื่อความสะอาดตา */
     div[data-testid="stSelectbox"] {
         display: none !important;
     }
     
-    /* 3. จัดให้ปุ่ม START / STOP ของ WebRTC อยู่กึ่งกลางหน้าจออย่างสวยงาม */
+    /* จัดปุ่ม START / STOP ให้อยู่กึ่งกลาง */
     div.element-container:has(button) {
         display: flex;
         justify-content: center;
@@ -50,11 +42,21 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✂️ LAB09 - AI Scissors Detection")
-st.write("ระบบตรวจจับวัตถุอันตรายอัจฉริยะ (Local Processing Mode)")
+st.title("✂️ AI Scissors Detection System")
+st.write("ระบบตรวจจับวัตถุอัจฉริยะแบบเรียลไทม์ รองรับการใช้งานผ่านมือถือ")
 st.markdown("---")
 
-# 2. โหลดโมเดล (ใช้ st.cache_resource)
+# --- 2. สร้างส่วนควบคุมการตั้งค่า (Sidebar) ---
+st.sidebar.header("⚙️ การตั้งค่าระบบ")
+enable_discord = st.sidebar.toggle("เปิดระบบส่งแจ้งเตือน Discord", value=False)
+
+DISCORD_WEBHOOK_URL = st.sidebar.text_input(
+    "Discord Webhook URL", 
+    value="https://discord.com/api/webhooks/1527568605670281316/c2oHzO7qNxOwpMyVMLCZaSEEcz3HyfALh2XmrQ7xFoWVMMgFd4Jzk8o3vH4hkZH7WJyc",
+    type="password"
+)
+
+# --- 3. โหลดโมเดลเข้าหน่วยความจำ ---
 MODEL_PATH = 'scissors_yolov8_e50/train_result/weights/best.pt'
 
 @st.cache_resource
@@ -62,92 +64,88 @@ def load_model():
     try:
         return YOLO(MODEL_PATH)
     except Exception as e:
-        st.error(f"❌ ไม่สามารถโหลดโมเดลได้: {e}")
+        st.error(f"❌ ไม่สามารถโหลดไฟล์โมเดลได้ (เช็กตำแหน่งไฟล์ {MODEL_PATH}): {e}")
         return None
 
 model = load_model()
 
-# def send_telegram(message, image_bytes):
-#     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-#     try:
-#         files = {'photo': ('detected.jpg', image_bytes, 'image/jpeg')}
-#         data = {'chat_id': CHAT_ID, 'caption': message}
-#         response = requests.post(url, files=files, data=data)
-#         return response.status_code == 200
-#     except Exception as e:
-#         return False
+# --- 4. ใช้ Class เป็นตัวกลางส่งผ่านข้อมูลข้าม Thread (แก้ปัญหาภาพค้าง / missing ScriptRunContext) ---
+class AppState:
+    last_alert_time = 0
+    alert_cooldown = 15  # วินาที
 
-if 'last_alert_time' not in st.session_state:
-    st.session_state.last_alert_time = 0
-alert_cooldown = 15
+def send_discord_alert(webhook_url, message, frame_bgr):
+    try:
+        payload = { "content": message }
+        _, img_encoded = cv2.imencode('.jpg', frame_bgr)
+        image_bytes = img_encoded.tobytes()
+        
+        files = { "file": ("detected.jpg", image_bytes, "image/jpeg") }
+        response = requests.post(webhook_url, data=payload, files=files)
+        return response.status_code in [200, 204]
+    except:
+        return False
 
-# 3. ฟังก์ชันหลักในการประมวลผลวิดีโอจาก WebRTC
+# --- 5. ฟังก์ชันหลักในการแกะเฟรมจากกล้องเว็บแคมมาประมวลผล ---
 def video_frame_callback(frame):
-    img = frame.to_ndarray(format="bgr24") # ดึงเฟรมภาพมาเป็น Numpy Array
+    img = frame.to_ndarray(format="bgr24") # แปลงเป็นอาเรย์ BGR ของ OpenCV
     
-    # แปลงสีให้เหมาะกับ YOLO (YOLO ชอบ RGB)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = model(img_rgb, stream=True, verbose=False)
-
-    object_detected = False
-    detected_name = ""
-    conf_score = 0
-
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
-            class_name = model.names[cls]
-
-            if conf > 0.3:
-                object_detected = True
-                detected_name = class_name
-                conf_score = conf
-
-                # วาดกรอบบนรูป
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                label = f"{class_name} {conf:.2f}"
-                cv2.putText(img, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    # current_time = time.time()
-    # if object_detected and (current_time - st.session_state.last_alert_time > alert_cooldown):
-    #     img_alert_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    #     img_pil = Image.fromarray(img_alert_rgb)
-    #     from io import BytesIO
-    #     buf = BytesIO()
-    #     img_pil.save(buf, format="JPEG")
-    #     byte_im = buf.getvalue()
-    # 
-    #     msg = f"🔔 [Mobile Alert] ตรวจพบ {detected_name}! (Confidence: {conf_score:.2f})"
-    #     send_telegram(msg, byte_im)
-    #     st.session_state.last_alert_time = current_time
+    if model is not None:
+        # ยัดโมเดลทำงาน
+        results = model(img, stream=True, verbose=False)
+        
+        object_detected = False
+        detected_name = ""
+        conf_score = 0
+        
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                conf = float(box.conf[0])
+                cls = int(box.cls[0])
+                class_name = model.names[cls]
+                
+                if conf > 0.3:
+                    object_detected = True
+                    detected_name = class_name
+                    conf_score = conf
+                    
+                    # วาดกรอบสี่เหลี่ยมและชื่อวัตถุ
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                    label = f"{class_name} {conf:.2f}"
+                    cv2.putText(img, label, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # 💡 เช็กการแจ้งเตือนโดยใช้ข้อมูลที่ดึงมาจากภายนอก Thread (หลีกเลี่ยง st.session_state)
+        current_time = time.time()
+        if object_detected and enable_discord:
+            if (current_time - AppState.last_alert_time > AppState.alert_cooldown):
+                msg = f"🔔 [Streamlit Alert] ตรวจพบ: {detected_name} (Confidence: {conf_score:.2f})"
+                # ส่งค่าจากปุ่มหน้าเว็บเข้าไปตรงๆ
+                send_discord_alert(DISCORD_WEBHOOK_URL, msg, img)
+                AppState.last_alert_time = current_time
 
     return frame.from_ndarray(img, format="bgr24")
 
-# 4. ปุ่มกดเปิด/ปิด กล้อง และตั้งค่าให้รองรับกล้องมือถือ (Responsive WebRTC)
+# --- 6. เปิดการเชื่อมต่อระบบกล้องผ่าน WebRTC ---
 if model is not None:
-    # ตั้งค่าระบบ Turn Server ฟรี
     RTC_CONFIGURATION = RTCConfiguration(
         {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
-
-    st.write("### 📸 กดปุ่ม START เพื่อเริ่มใช้งานกล้อง")
     
-    # ส่วนของกล่องควบคุม WebRTC
+    st.write("### 📸 กดปุ่ม START ด้านล่างเพื่อเริ่มเปิดกล้อง")
+    
     webrtc_streamer(
-        key="scissors-detection",
+        key="scissors-detection-system",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
         video_frame_callback=video_frame_callback,
-        # บังคับให้มือถือเรียกใช้กล้องหลัง (environment) เพื่อความสะดวก
         media_stream_constraints={
             "video": {"facingMode": "environment"},
             "audio": False
         },
         async_processing=True,
     )
-    
-    st.info("🔒 ความเป็นส่วนตัว: โปรเจกต์นี้ประมวลผลแบบเรียลไทม์บนหน้าเว็บเท่านั้น ไม่มีการบันทึกภาพหรือส่งข้อมูลใดๆ ไปยังเซิร์ฟเวอร์ภายนอก")
+
+st.info("🔒 ข้อมูลระบบ: ภาพประมวลผลสดบนหน้าเว็บเบราว์เซอร์ และจะส่งออกไปยัง Discord Webhook ของคุณเฉพาะเมื่อตรวจพบวัตถุเท่านั้น")
